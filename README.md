@@ -1,4 +1,4 @@
-# CloudFlow FP&A Analytics Pipeline
+# Sample FP&A Analytics Pipeline
 
 End-to-end FP&A analytics portfolio project that extracts accounting data from **QuickBooks Online**, processes it through a **Bronze / Silver / Gold** data architecture in **Azure SQL**, applies automated **data quality checks**, and prepares curated datasets for consumption in **Power BI**.
 
