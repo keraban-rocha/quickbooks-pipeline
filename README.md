@@ -133,6 +133,54 @@ The `src/` directory contains reusable application logic, while notebooks are us
 
 ## Pipeline Execution
 
+### Import source CSVs into QuickBooks
+
+`notebooks/00_import_quickbooks.py` seeds the configured QuickBooks sandbox before
+the extraction notebooks run. It reuses `src.config` and the rotating OAuth token
+in `src.quickbooks`; Azure SQL credentials are not required for this step.
+
+From the project root, validate the source files without calling the API:
+
+```powershell
+python notebooks/00_import_quickbooks.py
+```
+
+To create the validated records in the sandbox:
+
+```powershell
+python notebooks/00_import_quickbooks.py --apply
+```
+
+Use `--data-dir PATH` to choose another folder. The expected files are
+`qbo_chart_of_accounts.csv`, `customer_master.csv`, and
+`qbo_journal_import_part*.csv`, using the existing `Data/` column headers.
+The default dataset contains 46 accounts, 1,068 customers, and 36 journals.
+In Jupyter, run `%run 00_import_quickbooks.py` from the notebooks folder; add
+`--apply` when ready to import.
+
+Accounts are created first, then customers, then journals with resolved QBO IDs.
+Customer_ID becomes DisplayName, and source attributes are retained in Notes;
+churn does not deactivate a customer. CSV detail-type labels are mapped to US
+API enums. The two Other Expense accounts use OtherMiscellaneousExpense to
+preserve their source account classification. Review DETAIL_TYPES for other
+company locales. Nonempty TaxCode, Location, and Class are rejected until their
+reference mappings are implemented; journal Name currently means a customer ID.
+
+The importer validates all files before connecting, checks existing records
+before creating anything, and skips matching records. Existing accounts with no
+account number (such as sandbox Checking) can be reused without modification.
+Inactive records, duplicate identities, and conflicting payloads stop the run.
+Existing journal comparison includes date, memo, and ordered lines. Nothing is
+updated or deleted. Imports are not atomic: successful records remain if a later
+request fails. Rerun the same inputs to resume; do not run concurrent imports.
+Stable request IDs protect retries of identical create requests, following
+[Intuit's API guidance](https://blogs.a.intuit.com/2018/09/10/quickbooks-online-api-best-practices/).
+After resetting the sandbox, use a fresh company if QuickBooks still replays old
+request IDs. API acceptance of locale-specific account types is checked by QBO
+during the actual import, not by offline validation.
+
+Run isolated importer tests with `python -m unittest discover -s tests -v`.
+
 Individual notebooks can be used during development:
 
 ```text
