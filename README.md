@@ -394,3 +394,25 @@ Completed:
 - Gold monthly P&L Actuals
 - Automated QA framework
 - End-to-end pipeline notebook
+
+
+## Azure SQL reset notebook
+
+[`notebooks/99_reset_azure_sql.ipynb`](notebooks/99_reset_azure_sql.ipynb) uses
+[`src/azure_sql_cleanup.py`](src/azure_sql_cleanup.py) and the existing Azure SQL
+connection settings to preview and drop all user tables and custom schemas in
+the configured database, including user tables in `dbo`. Built-in schemas and
+the database remain. This is separate from the QuickBooks sandbox reset.
+
+Run the setup and read-only preview cells first. To execute, set
+`APPLY_CLEANUP = True`, enter the preview's exact database name in
+`CONFIRM_DATABASE`, rerun the settings cell, then run the execution cell.
+The saved notebook defaults to preview-only. CONTROL permission on the database
+is required. Stop concurrent pipeline runs before executing.
+
+The helper removes foreign keys, handles temporal system versioning, and drops
+tables before custom schemas. Other schema objects and special table types are
+reported as blockers. It rechecks the reviewed plan and executes in a transaction;
+errors roll back, and remaining tables/schemas are checked before committing.
+Successful execution removes table data and definitions. Run the analytics
+pipeline afterward to rebuild its tables and schemas.
