@@ -8,7 +8,9 @@ End-to-end FP&A analytics portfolio project that extracts accounting data from *
 
 ```mermaid
 flowchart LR
-    A[QuickBooks Online API] --> B[Python]
+    CSV[Local synthetic CSVs] --> Import[Import notebook and qbo_import.py]
+    Import --> A[QuickBooks Online API]
+    A --> B[Python extraction]
     B --> C[(Azure SQL - Bronze)]
     C --> D[Silver Transformations]
     D --> E[(Azure SQL - Silver)]
@@ -103,68 +105,109 @@ Critical failures can stop the pipeline before downstream consumption.
 ## Project Structure
 
 ```text
-cloudflow-fpa/
-│
-├── notebooks/
-│   ├── 00_setup_and_connections.ipynb
-│   ├── 01_extract_quickbooks_bronze.ipynb
-│   ├── 02_transform_silver.ipynb
-│   ├── 03_build_gold.ipynb
-│   ├── 04_qa_checks.ipynb
-│   └── 99_run_pipeline.ipynb
-│
-├── src/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── quickbooks.py
-│   ├── azure_sql.py
-│   ├── transformations.py
-│   └── qa.py
-│
-├── tokens/
-│   └── qbo_tokens.json
-│
-├── .env
-├── .gitignore
-└── README.md
+quickbooks-pipeline/
+|-- notebooks/
+|   |-- 00_setup_and_connections.ipynb
+|   |-- 00_import_quickbooks.ipynb
+|   |-- 01_extract_quickbooks_bronze.ipynb
+|   |-- 02_transform_silver.ipynb
+|   |-- 03_build_gold.ipynb
+|   |-- 04_qa_checks.ipynb
+|   |-- 99_run_pipeline.ipynb
+|   `-- 99_reset_qbo_sandbox.ipynb
+|-- src/
+|   |-- __init__.py
+|   |-- config.py
+|   |-- quickbooks.py
+|   |-- qbo_import.py
+|   |-- qbo_cleanup.py
+|   |-- azure_sql.py
+|   |-- transformations.py
+|   `-- qa.py
+|-- tests/
+|   `-- test_qbo_import.py
+|-- Data/                      # Local input files; excluded from Git
+|-- tokens/                    # Local OAuth token; excluded from Git
+|   `-- qbo_tokens.json
+|-- .venv/                     # Local Python environment
+|-- .env                       # Local connection settings and secrets
+|-- .gitignore
+`-- README.md
 ```
 
-The `src/` directory contains reusable application logic, while notebooks are used to execute and document each pipeline stage.
+### Why the code is separated
+
+Notebooks provide the interactive entry points: choose settings, execute stages,
+and inspect tables and results. The `src/` modules implement reusable functions
+so the same logic can be used by individual notebooks, the full pipeline, and
+automated tests. Python execution files in `notebooks/` use `.ipynb`; reusable
+modules in `src/` use `.py`.
+
+| Module | Responsibility |
+|---|---|
+| `config.py` | Load `.env`, define project paths and API/database settings, and validate pipeline configuration. |
+| `quickbooks.py` | Refresh OAuth credentials and extract QuickBooks accounts, customers, and journals. |
+| `qbo_import.py` | Validate source CSVs, build API payloads, resolve references, and create missing QuickBooks records. |
+| `qbo_cleanup.py` | Delete sandbox transactions for a reset; run separately from normal imports and refreshes. |
+| `azure_sql.py` | Connect to Azure SQL and provide database read/write helpers. |
+| `transformations.py` | Build Bronze payload rows and transform accounting data into Silver tables. |
+| `qa.py` | Evaluate data quality during a pipeline run and record results. |
+
+Bronze, Silver, and Gold are Azure SQL data layers, not source-code folders.
+`Data/` contains the synthetic inputs used to seed the sandbox and support the
+portfolio. `tests/` checks code behavior with simulated API responses; this is
+separate from `src/qa.py`, which checks the actual datasets during execution.
 
 ## Pipeline Execution
 
 ### Import source CSVs into QuickBooks
 
-`notebooks/00_import_quickbooks.py` seeds the configured QuickBooks sandbox before
-the extraction notebooks run. It reuses `src.config` and the rotating OAuth token
-in `src.quickbooks`; Azure SQL credentials are not required for this step.
+`notebooks/00_import_quickbooks.ipynb` seeds the configured QuickBooks sandbox
+before the extraction notebooks run. Reusable logic lives in `src/qbo_import.py`
+and reuses the existing configuration and rotating OAuth token. Azure SQL
+credentials are not required for this step.
 
-From the project root, validate the source files without calling the API:
+Open the notebook in Jupyter or VS Code from the project root or `notebooks/`
+folder and run the cells in order. Set `APPLY_IMPORT = False` to validate and
+preview without API calls. The currently saved notebook has `APPLY_IMPORT = True`;
+check this setting before running all cells. To import, use `True`, rerun the
+configuration cell, and run the execution cell.
 
-```powershell
-python notebooks/00_import_quickbooks.py
+The configuration cell selects the inputs explicitly:
+
+```python
+DATA_DIR = PROJECT_ROOT / "Data"
+ACCOUNT_FILE = "qbo_chart_of_accounts.csv"
+CUSTOMER_FILE = "customer_master.csv"
+JOURNAL_FILES = [
+    "qbo_journal_import_part1.csv",
+    "qbo_journal_import_part2.csv",
+]
+APPLY_IMPORT = False  # Use True to create records in the sandbox.
 ```
 
-To create the validated records in the sandbox:
+The notebook locates the project, imports the helper functions, loads and
+validates the files, and displays counts and sample payloads. Its execution cell
+reloads the inputs before importing. On success, it summarizes records as
+`created` or `reused`, with QBO IDs available in `import_results`.
 
-```powershell
-python notebooks/00_import_quickbooks.py --apply
-```
-
-Use `--data-dir PATH` to choose another folder. The expected files are
-`qbo_chart_of_accounts.csv`, `customer_master.csv`, and
-`qbo_journal_import_part*.csv`, using the existing `Data/` column headers.
-The default dataset contains 46 accounts, 1,068 customers, and 36 journals.
-In Jupyter, run `%run 00_import_quickbooks.py` from the notebooks folder; add
-`--apply` when ready to import.
+Set `DATA_DIR` in the notebook to choose another folder. The notebook explicitly
+selects `qbo_chart_of_accounts.csv`, `customer_master.csv`, `qbo_journal_import_part1.csv`, and
+`qbo_journal_import_part2.csv`, using the existing `Data/` column headers.
+These files contain 46 accounts, 1,068 customers, and 36 journals (1,577 lines).
+Set `CUSTOMER_FILE = None` in the notebook to skip customer import.
 
 Accounts are created first, then customers, then journals with resolved QBO IDs.
-Customer_ID becomes DisplayName, and source attributes are retained in Notes;
-churn does not deactivate a customer. CSV detail-type labels are mapped to US
+Customer_ID maps to DisplayName; all populated source attributes are preserved
+in Notes. QBO assigns its own internal customer Id. MRR, seats, segment, tier,
+region, and dates remain descriptive notes; they do not create transactions.
+Churn_Date does not deactivate a customer.
+CSV detail-type labels are mapped to US
 API enums. The two Other Expense accounts use OtherMiscellaneousExpense to
 preserve their source account classification. Review DETAIL_TYPES for other
 company locales. Nonempty TaxCode, Location, and Class are rejected until their
-reference mappings are implemented; journal Name currently means a customer ID.
+reference mappings are implemented. A nonempty journal Name must match a
+Customer_ID in the selected customer file.
 
 The importer validates all files before connecting, checks existing records
 before creating anything, and skips matching records. Existing accounts with no
@@ -179,7 +222,71 @@ After resetting the sandbox, use a fresh company if QuickBooks still replays old
 request IDs. API acceptance of locale-specific account types is checked by QBO
 during the actual import, not by offline validation.
 
-Run isolated importer tests with `python -m unittest discover -s tests -v`.
+### How the import code works
+
+The [import notebook](notebooks/00_import_quickbooks.ipynb) calls functions in
+[`src/qbo_import.py`](src/qbo_import.py):
+
+| Function or class | What it does |
+|---|---|
+| `read_csv()` | Reads UTF-8 CSVs (including a BOM), trims values, and rejects missing columns, malformed rows, and empty files. |
+| `validate_unique()` | Rejects blank or repeated account names, account numbers, and customer display names; comparisons ignore case. |
+| `money()` | Uses `Decimal` to reject negative, non-finite, or more-than-two-decimal-place amounts. |
+| `load_import_data()` | Builds Account, Customer, and JournalEntry payloads; validates journal balances and references before any API call. Customer loading is enabled by the notebook's explicit `customer_file` argument. |
+| `QBOClient` | Reuses OAuth token refresh, maintains an HTTP session, queries records in pages of 1,000, and creates entities with stable request IDs. |
+| `find_existing()` / `matches()` | Find existing identities and compare supplied fields while ignoring fields generated by QBO. |
+| `import_records()` | Checks remote records for conflicts, creates accounts and customers first, replaces journal name references with QBO IDs, and creates missing journals. |
+
+`QBOClient` is restricted to the configured sandbox URL. It refreshes credentials
+on HTTP 401 and makes up to four attempts for connection errors, timeouts,
+HTTP 429, and server errors. Create requests reuse a deterministic request ID
+based on the company URL, entity, and payload. Exhausted retries and API faults
+stop execution rather than silently skipping records.
+
+### CSV-to-API mappings
+
+The input files use the project's CSV layout. The importer converts them into
+JSON objects expected by the QuickBooks API.
+
+| Input | CSV fields | Resulting API fields |
+|---|---|---|
+| Chart of Accounts | `Account Name`, `Account Number`, `Type`, `Detail Type` | `Name`, `AcctNum`, `AccountType`, mapped `AccountSubType` |
+| Customers | `Customer_ID` | `DisplayName`; QBO generates its own internal `Id` |
+| Customers | All populated source columns | A semicolon-separated string in `Notes` |
+| Journals | `*JournalNo`, `*JournalDate`, `Memo` | `DocNumber`, ISO `TxnDate`, `PrivateNote` |
+| Journal lines | `*AccountName`, `Debits`, `Credits`, `Description` | Resolved `AccountRef`, `Amount`, `PostingType`, and line `Description` |
+| Journal lines | Optional `Name` | Customer `EntityRef` resolved from the selected customer file |
+
+Journal rows are grouped by journal number within each file. Dates must use
+`M/D/YYYY`; every journal must have a consistent date and memo, at least two
+lines, and equal debit and credit totals. Each line must contain exactly one
+positive debit or credit. A journal number appearing in both selected files is
+rejected. Only explicitly selected files are read.
+
+`customer_master.csv` has no names, emails, or postal addresses. Its synthetic
+IDs therefore appear as customer names in QBO. Subscription metrics remain
+text in Notes, not native subscription fields, invoices, or revenue postings.
+If customer import is disabled, journal `Name` values must be blank.
+
+### Importer tests
+
+Run from the project root with the project environment active:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+[`tests/test_qbo_import.py`](tests/test_qbo_import.py) uses a fake client to check
+creation order, reference resolution, reruns, conflict blocking before writes,
+and resuming after a partial import. It also checks invalid monetary values and
+paginated reads including inactive master records. These tests do not call QBO
+and do not prove live API acceptance of a payload.
+
+### Run the analytics pipeline
+
+Importing seeds QuickBooks; extraction then brings those records into Azure SQL.
+`99_run_pipeline.ipynb` runs the analytics refresh and does not invoke the CSV
+import or sandbox cleanup.
 
 Individual notebooks can be used during development:
 
@@ -212,7 +319,19 @@ Install the required packages:
 pip install pandas requests python-dotenv sqlalchemy pyodbc jupyter ipykernel
 ```
 
-Microsoft **ODBC Driver 18 for SQL Server** must also be installed locally.
+Microsoft **ODBC Driver 18 for SQL Server** must also be installed locally for
+the Azure SQL stages.
+
+To register a recognizable Jupyter kernel for this environment:
+
+```powershell
+python -m ipykernel install --user --name quickbooks-pipeline --display-name "Python (quickbooks-pipeline)"
+```
+
+In VS Code, select **Python (quickbooks-pipeline)** in the notebook kernel picker.
+If VS Code remains stuck connecting, use **Developer: Reload Window**, then
+select the kernel again. Kernel startup is separate from CSV validation and
+QuickBooks API execution.
 
 Create a `.env` file in the project root:
 
@@ -265,6 +384,8 @@ Never commit QuickBooks credentials, refresh tokens, or Azure SQL passwords.
 
 Completed:
 
+- CSV-to-QuickBooks import notebook for accounts, customers, and journal entries
+- Import validation, conflict detection, retry handling, and isolated tests
 - QuickBooks OAuth integration
 - QuickBooks API extraction
 - Azure SQL connectivity
