@@ -112,6 +112,7 @@ quickbooks-pipeline/
 |   |-- 01_extract_quickbooks_bronze.ipynb
 |   |-- 02_transform_silver.ipynb
 |   |-- 03_build_gold.ipynb
+|   |-- 05_import_budget_forecast.ipynb
 |   |-- 04_qa_checks.ipynb
 |   |-- 99_run_pipeline.ipynb
 |   `-- 99_reset_qbo_sandbox.ipynb
@@ -120,6 +121,7 @@ quickbooks-pipeline/
 |   |-- config.py
 |   |-- quickbooks.py
 |   |-- qbo_import.py
+|   |-- planning.py
 |   |-- qbo_cleanup.py
 |   |-- azure_sql.py
 |   |-- transformations.py
@@ -416,3 +418,93 @@ reported as blockers. It rechecks the reviewed plan and executes in a transactio
 errors roll back, and remaining tables/schemas are checked before committing.
 Successful execution removes table data and definitions. Run the analytics
 pipeline afterward to rebuild its tables and schemas.
+
+
+## FP&A budget and rolling forecast imports
+
+[`notebooks/05_import_budget_forecast.ipynb`](notebooks/05_import_budget_forecast.ipynb)
+loads `Data/budget_detail.csv` and `Data/forecast_detail.csv` through
+[`src/planning.py`](src/planning.py). Run the Actuals pipeline first; the importer
+requires `silver.dim_account` and `gold.pnl_monthly_actual`. It does not modify
+QuickBooks or the existing Actuals tables.
+
+The supplied CSVs each contain 1,620 rows across 36 months and 45 accounts. The
+notebook assumes a September fiscal start, labeling budgets FY2024, FY2025, and
+FY2026 by ending year. Configure `FISCAL_START_MONTH` and `BUDGET_LABEL` to match
+the approved FP&A calendar and revision. The forecast keeps its source version
+`2026-04 Latest Forecast`; `FORECAST_AS_OF` explicitly assigns April 30, 2026.
+Its 1,440 Actualized rows cover September 2023-April 2026, and 180 Forecast rows
+cover May-August 2026. Future snapshots require a new version name and as-of
+mapping. The as-of month is treated as the last actualized month.
+
+### Run the notebook
+
+1. Run setup and configuration; `APPLY_IMPORT = False` is the saved default.
+2. Validate the CSVs and inspect totals by scenario, version, and Basis.
+3. Run the read-only Azure SQL account-mapping preview and inspect the target.
+4. Set `APPLY_IMPORT = True`, rerun configuration, and run the import cell.
+5. Review the committed reconciliation summary and refresh Power BI.
+
+Both files load in one transaction. Versions present in the files are replaced
+in full; versions absent from the files are retained. Supply complete snapshots,
+not incremental patches. Identical reruns do not duplicate records. New budget
+labels or forecast version names retain separate revisions. The loader serializes
+plan imports and verifies row counts and reporting totals before commit.
+
+### SQL objects and comparison grain
+
+| Object | Grain and purpose |
+|---|---|
+| `silver.fact_plan` | Version + month + account + department; stores Budget and Forecast, Basis, fiscal year, snapshot date, driver, both USD amounts, source filename/hash, load batch, and UTC load time. |
+| `gold.fpa_monthly` | Month + account + scenario + version; combines live Actuals with aggregated plans without joining fact rows to one another. |
+| `gold.fpa_account` | One row per QBO account ID; includes account number and planning P&L section/subcategory. Accounts without planning metadata are labeled Unmapped. |
+| `gold.fpa_month` | One row per available month, including calendar and fiscal attributes. |
+| `gold.fpa_version` | One row per scenario/version key, with forecast as-of date. |
+
+Account numbers from CSVs map uniquely to QBO account IDs in `silver.dim_account`.
+Missing/ambiguous mappings, inconsistent account classifications or metadata,
+duplicate detail keys, invalid cents, sign mismatches, and inconsistent forecast
+Basis/as-of dates stop the load. Amounts are stored as `DECIMAL(18,2)` and load
+timestamps as `DATETIMEOFFSET`. Source files remain local and are excluded from Git.
+
+`reporting_amount_usd` is the comparison measure: revenue positive, expenses and
+contra revenue negative. The source Reporting Amount columns already use this
+convention; the Gold view converts expense-positive Actuals accordingly.
+`amount_usd` preserves the source presentation and should not be used for additive
+P&L variance comparisons because contra-revenue presentation can differ by source.
+
+Department and Primary_Driver stay in planning detail. The existing Actuals Gold
+table has no department grain, so the comparison view aggregates plans across
+departments. Department-level Actual vs Plan requires an additional Actuals
+transformation; the importer does not invent an allocation.
+
+### Power BI usage
+
+Relate `fpa_account`, `fpa_month`, and `fpa_version` one-to-many to `fpa_monthly`
+using `account_id`, `month_start`, and `version_key`, with single-direction
+filtering from dimensions to the fact. This follows the
+[consistent-grain star-schema guidance](https://learn.microsoft.com/en-us/power-bi/guidance/star-schema).
+Use scenario-specific measures rather than a total across all scenarios.
+
+Choose exactly one forecast version, and one budget revision per fiscal year.
+Actual measures must clear version-dimension filters before applying Scenario =
+Actual; otherwise a Budget/Forecast version slicer can hide Actuals. A dashboard
+can use separate disconnected Budget and Forecast selectors for independent
+comparison selection. Actual minus Budget/Forecast on reporting amounts gives
+favorable-positive variance, including expenses.
+
+A full-year rolling forecast includes both Actualized and Forecast rows from the
+selected snapshot. Do not add snapshot Actualized amounts to live Actuals. For
+future-period comparisons, filter Basis = Forecast and apply the same month range
+to Actual. Snapshot history is preserved even if accounting Actuals are restated.
+The month dimension covers months present in either fact; add a daily calendar
+when daily time-intelligence is needed.
+
+The views are not schema-bound and read refreshed Actuals after the pipeline
+finishes. The SQL cleanup notebook reports these views as blockers rather than
+automatically deleting them. `99_run_pipeline.ipynb` does not reload plan CSVs;
+run this import notebook when FP&A publishes a new or corrected snapshot.
+
+`tests/test_planning.py` covers fiscal-year versions, contra-revenue signs,
+duplicate grain, forecast cutoff validation, account mapping, and stable version
+keys. Run all tests with `python -m unittest discover -s tests -v`.
