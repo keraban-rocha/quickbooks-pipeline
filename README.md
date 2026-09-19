@@ -4,6 +4,8 @@ End-to-end FP&A analytics portfolio project that extracts accounting data from *
 
 > This project uses synthetic business data and a QuickBooks Online sandbox environment. No real company or customer data is included.
 
+Before committing notebooks, clear outputs that expose local paths or database connection details. Keep `.env` and `tokens/` local and ignored by Git.
+
 ## Architecture
 
 ```mermaid
