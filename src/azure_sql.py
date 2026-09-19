@@ -3,6 +3,7 @@ import pandas as pd
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.dialects.mssql import DATETIMEOFFSET, NVARCHAR
 from urllib.parse import quote_plus
 
 from src.config import (
@@ -22,11 +23,14 @@ def get_engine():
         f"PWD={AZURE_SQL_PASSWORD};"
         "Encrypt=yes;"
         "TrustServerCertificate=no;"
+        "LongAsMax=Yes;"
     )
 
     return create_engine(
         f"mssql+pyodbc:///?odbc_connect={connection_string}",
-        fast_executemany=True,
+        # Use normal parameter binding for variable-length NVARCHAR(MAX) JSON.
+        # pyodbc's fast array binding can allocate undersized string buffers.
+        fast_executemany=False,
         pool_pre_ping=True,
         connect_args={
             "timeout": 120
@@ -99,6 +103,22 @@ def write_dataframe(
     dtype=None
 ):
     engine = engine or get_engine()
+
+    # Keep raw ingestion types consistent even when a notebook's dtype dict
+    # predates the explicit mapping. SQL Server TIMESTAMP is a rowversion,
+    # not an extraction date/time.
+    if schema == "bronze" and table in {
+        "qbo_accounts_raw", "qbo_customers_raw", "qbo_journal_entries_raw"
+    }:
+        dtype = dict(dtype or {})
+        raw_types = {
+            "entity_id": NVARCHAR(100),
+            "batch_id": NVARCHAR(36),
+            "extracted_at": DATETIMEOFFSET(),
+            "payload_json": NVARCHAR(None),
+        }
+        dtype.update({name: sql_type for name, sql_type in raw_types.items()
+                      if name in df.columns})
 
     ensure_schema(schema, engine)
 
